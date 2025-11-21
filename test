@@ -1,0 +1,273 @@
+# =========================
+# A1. 規則設定：wrong / correct + context + auto
+# =========================
+
+rules = [
+    {
+        # 同音錯字：新竹 -> 清楚（只在特定語境）
+        "wrong": "新竹",
+        "correct": "清楚",
+        "context": [
+            r"(太|不夠|再|更|很)新竹",          # 太新竹 / 不夠新竹
+            r"新竹(一點|一些|一下|一點點)",      # 新竹一點
+            r"(講得|說得|表達得)新竹",          # 講得新竹
+        ],
+        "auto": False,  # 只在 context 成立時替換
+    },
+    {
+        # 永遠替換型：保單借錢 -> 保單借款
+        "wrong": "保單借錢",
+        "correct": "保單借款",
+        "context": [],
+        "auto": True,   # 不看 context，出現就改
+    },
+    # 你可以在這裡繼續加：
+    # {"wrong": "利潤", "correct": "利率", "context": [...], "auto": False},
+]
+
+
+# =========================
+# A2. 規則套用：對一句話做 wrong→correct
+# =========================
+
+def apply_rules_to_sentence(sentence, rules):
+    new_sentence = sentence
+    applied = []
+
+    for r in rules:
+        wrong = r["wrong"]
+        correct = r["correct"]
+
+        if wrong not in new_sentence:
+            continue
+
+        # auto=True：只要有錯字就直接改
+        if r.get("auto", False):
+            new_sentence = new_sentence.replace(wrong, correct)
+            applied.append((wrong, correct))
+            continue
+
+        # 否則檢查 context regex
+        for pat in r["context"]:
+            if re.search(pat, new_sentence):
+                new_sentence = new_sentence.replace(wrong, correct)
+                applied.append((wrong, correct))
+                break
+
+    return new_sentence, applied
+
+
+def fix_transcript_by_rules(transcript, rules):
+    sentences = split_sentences(transcript)
+    results = []
+
+    for idx, s in enumerate(sentences):
+        new_s, applied = apply_rules_to_sentence(s, rules)
+        results.append({
+            "segment": idx,
+            "original": s,
+            "corrected": new_s,
+            "applied_rules": applied,
+        })
+
+    corrected_full = "。".join(r["corrected"] for r in results if r["corrected"]) + "。"
+    return corrected_full, results
+
+
+# =========================
+# A3. 測試情境 A
+# =========================
+
+transcript_A = """
+你剛才講得不夠新竹，我覺得客戶可能會聽不懂。
+之後保單借錢的利率部分要再說明一次。
+我住在新竹市，所以通勤時間比較久。
+"""
+
+fixed_A, details_A = fix_transcript_by_rules(transcript_A, rules)
+
+print("=== [情境 A] 規則修正後 ===")
+print(fixed_A)
+
+print("\n=== A 明細（哪些句子有被 rule 修正） ===")
+for d in details_A:
+    if d["applied_rules"]:
+        print(d)
+
+
+# =========================
+# B1. domain 熱詞庫（正確詞）
+# =========================
+
+domain_hotwords = [
+    "保單借款",
+    "解約金",
+    "年化利率",
+    "保單價值準備金",
+    "保費折減",
+    # "清楚" 也可以放進來，但純同音（新竹→清楚）單靠字形抓不到
+]
+
+# =========================
+# B2. Levenshtein + 相似度
+# =========================
+
+def levenshtein(a, b):
+    n, m = len(a), len(b)
+    if n == 0:
+        return m
+    if m == 0:
+        return n
+    dp = [[0] * (m + 1) for _ in range(n + 1)]
+    for i in range(n + 1):
+        dp[i][0] = i
+    for j in range(m + 1):
+        dp[0][j] = j
+    for i in range(1, n + 1):
+        for j in range(1, m + 1):
+            cost = 0 if a[i - 1] == b[j - 1] else 1
+            dp[i][j] = min(
+                dp[i - 1][j] + 1,
+                dp[i][j - 1] + 1,
+                dp[i - 1][j - 1] + cost,
+            )
+    return dp[n][m]
+
+
+def similarity(a, b):
+    if not a and not b:
+        return 1.0
+    d = levenshtein(a, b)
+    return 1 - d / max(len(a), len(b))
+
+
+# =========================
+# B3. 在一句話裡用熱詞庫找「長得像」的片段
+# =========================
+
+def find_replacements_in_sentence(sentence, hotwords, sim_threshold=0.6):
+    candidates = []
+    sent_len = len(sentence)
+
+    for hw in hotwords:
+        hw_len = len(hw)
+        if hw_len == 0 or hw_len > sent_len:
+            continue
+
+        # 如果本來就有正確熱詞，就不需要修這個 hw
+        if hw in sentence:
+            continue
+
+        for start in range(0, sent_len - hw_len + 1):
+            chunk = sentence[start:start + hw_len]
+            if chunk == hw:
+                continue
+            sim = similarity(chunk, hw)
+            if sim >= sim_threshold:
+                candidates.append({
+                    "start": start,
+                    "end": start + hw_len,
+                    "chunk": chunk,
+                    "hotword": hw,
+                    "similarity": sim,
+                })
+
+    # 避免重疊：相似度高、熱詞長的優先
+    candidates.sort(key=lambda c: (c["similarity"], len(c["hotword"])), reverse=True)
+
+    accepted = []
+    occupied = set()
+    for c in candidates:
+        if any(pos in occupied for pos in range(c["start"], c["end"])):
+            continue
+        accepted.append(c)
+        for pos in range(c["start"], c["end"]):
+            occupied.add(pos)
+
+    return accepted
+
+
+def apply_replacements(sentence, replacements):
+    if not replacements:
+        return sentence
+    chars = list(sentence)
+    for r in replacements:
+        start, end = r["start"], r["end"]
+        hw = r["hotword"]
+        chars[start:end] = list(hw)
+    return "".join(chars)
+
+
+def fix_transcript_with_hotwords(transcript, hotwords, sim_threshold=0.6):
+    sentences = split_sentences(transcript)
+    results = []
+
+    for idx, s in enumerate(sentences):
+        reps = find_replacements_in_sentence(s, hotwords, sim_threshold)
+        new_s = apply_replacements(s, reps)
+        results.append({
+            "segment": idx,
+            "original": s,
+            "corrected": new_s,
+            "replacements": reps,
+        })
+
+    corrected_full = "。".join(r["corrected"] for r in results if r["corrected"]) + "。"
+    return corrected_full, results
+
+
+# =========================
+# B4. 測試情境 B
+# =========================
+
+transcript_B = """
+這次主要說明保單借錢的流程，以及計算解約今的方式。
+年化利潤的部分如果講錯，也要一併修正。
+"""
+
+fixed_B, details_B = fix_transcript_with_hotwords(transcript_B, domain_hotwords, sim_threshold=0.6)
+
+print("=== [情境 B] 熱詞 + 相似度修正後 ===")
+print(fixed_B)
+
+print("\n=== B 明細（每句修了什麼） ===")
+for d in details_B:
+    if d["replacements"]:
+        print(f"\n[segment {d['segment']}]")
+        print("原句：", d["original"])
+        print("修正：", d["corrected"])
+        print("替換：", d["replacements"])
+
+# =========================
+# C. 整合：先規則修正 -> 再熱詞修正
+# =========================
+
+transcript_C = """
+你剛才講得不夠新竹，我覺得客戶可能會聽不懂。
+這次主要說明保單借錢的流程，以及計算解約今的方式。
+"""
+
+print("=== [原始逐字稿 C] ===")
+print(transcript_C)
+
+# 1️⃣ 先跑 wrong/correct 規則（處理同音錯字）
+after_rules, details_C1 = fix_transcript_by_rules(transcript_C, rules)
+
+print("\n=== C1 after rules（先處理新竹→清楚/保單借錢→保單借款） ===")
+print(after_rules)
+
+# 2️⃣ 再跑 熱詞 + 相似度（處理字形相似：解約今→解約金 等）
+final_text, details_C2 = fix_transcript_with_hotwords(after_rules, domain_hotwords, sim_threshold=0.6)
+
+print("\n=== C2 final（規則 + 熱詞兩層處理後） ===")
+print(final_text)
+
+print("\n=== C1 明細（規則套用） ===")
+for d in details_C1:
+    if d["applied_rules"]:
+        print(d)
+
+print("\n=== C2 明細（熱詞相似度替換） ===")
+for d in details_C2:
+    if d["replacements"]:
+        print(d)
