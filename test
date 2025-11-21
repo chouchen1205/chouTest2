@@ -1,3 +1,9 @@
+def split_sentences(text):
+    """很粗的中文斷句，之後你覺得不夠可以自己換。"""
+    parts = re.split(r"[。！？!?；;]\s*|\n+", text)
+    return [p.strip() for p in parts if p.strip()]
+
+
 # =========================
 # A1. 規則設定：wrong / correct + context + auto
 # =========================
