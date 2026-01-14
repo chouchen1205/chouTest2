@@ -1,0 +1,41 @@
+-- DQS-005628
+select
+    t1.*,
+    ed.CREATED_USER 編輯人員,
+    ed.PAGENUM 編輯頁數
+from (
+    select
+        sd.ICF_GUID,
+        qs.STATUS,
+        qs.CREATED_USER 送審編輯人員,
+        qs.CREATED_DATE 資料送審時間,
+        min(cast(sd.START_TIME as date)) as 資料開始辨識時間,
+        max(cast(sd.FINISH_TIME as date)) as 資料結束辨識時間,
+        count(*) 辨識頁數
+    from MBE0_OEAP_PROD.uw_ocr_queue_state_detail sd
+    join MBE0_OEAP_PROD.uw_ocr_queue_state qs
+        on sd.quuid = qs.quuid
+       and sd.ICF_GUID = qs.ICF_GUID
+    where sd.CREATED_DATE between
+          to_timestamp('2025-11-02 00:00:00', 'YYYY-MM-DD HH24:MI:SS')
+      and to_timestamp('2026-01-11 23:59:59', 'YYYY-MM-DD HH24:MI:SS')
+      and qs.STATUS in ('Housekeeping', 'Finish')
+    group by
+        sd.ICF_GUID,
+        qs.STATUS,
+        qs.CREATED_USER,
+        qs.CREATED_DATE
+    order by min(sd.CREATED_DATE)
+) t1
+left join (
+    select
+        ICF_GUID,
+        CREATED_USER,
+        PAGENUM
+    from MBE0_OEAP_PROD.uw_ocr_queue_state_edited
+    group by
+        ICF_GUID,
+        CREATED_USER,
+        PAGENUM
+) ed
+on t1.ICF_GUID = ed.ICF_GUID;
